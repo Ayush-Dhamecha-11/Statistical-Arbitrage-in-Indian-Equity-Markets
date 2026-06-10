@@ -80,7 +80,7 @@
     "BHEL.NS",
     "CONCOR.NS"
   ],
-  "date_fetched": "2026-06-06T00:19:27.978739",
+  "date_fetched": "2026-06-07T22:58:50.706320",
   "characteristics": [
     "Ret_D1",
     "Ret_W1",
@@ -106,7 +106,7 @@
     "DistMA50",
     "DistMA200"
   ],
-  "n_characteristics": 24,
+  "n_characteristics": 23,
   "panel_shape": [
     286962,
     47
