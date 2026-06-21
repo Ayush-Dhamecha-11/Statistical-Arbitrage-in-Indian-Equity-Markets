@@ -265,7 +265,7 @@ class AttentionFactorModel(nn.Module):
     def __init__(
         self,
         N, M, K=8, d=32, s=30,
-        lambda_ridge=1e-4,
+        lambda_ridge=1e-2,
         d_hidden_conv=32,
         lambda_squash=0.001,
         dropout=0.1,
@@ -512,6 +512,8 @@ class AttentionFactorModel(nn.Module):
         # Mapping to asset space
         omega_eps = self.compute_residual_projection_mat(beta, omega_F) # (N, N)
         omega_t = self.compute_portfolio_weights(omega_eps, omega_port) # (N,)
+        l1 = omega_t.abs().sum()
+        omega_t = omega_t / (l1 + 1e-8)
 
         # Gross profit return
         R_port_gross = torch.dot(R_curr, omega_t) # scalar
@@ -524,11 +526,6 @@ class AttentionFactorModel(nn.Module):
         # Do not let gradient flow to next timestep
         self.omega_prev.copy_(omega_t.detach())
 
-        # Compute explained variance
-        var_R = (R_curr ** 2).mean().clamp(min=1e-8)
-        var_eps = (eps_t ** 2).mean()
-        explained_var = 1.0 - var_eps / var_R  # scalar
-
         return {
             "R_port_gross": R_port_gross,
             "R_port_net": R_port_net,
@@ -539,7 +536,6 @@ class AttentionFactorModel(nn.Module):
             "eps_t": eps_t,
             "beta": beta,
             "F_t": F_t,
-            "explained_var": explained_var,
         }
     
     def forward_sequence(self, X, R) -> Dict[str, torch.Tensor]:
@@ -584,7 +580,9 @@ class AttentionFactorModel(nn.Module):
         returns_net = []
         costs = []
         omegas = []
-        explained_vars = []
+        attention_weights = []
+        e_t = []
+        R_t = []
 
         # main loop over timesteps
         for t in range(1, T):
@@ -600,6 +598,8 @@ class AttentionFactorModel(nn.Module):
                     F_t = self.compute_factor_returns(omega_F, R_curr)
                     beta = self.compute_factor_loadings(omega_F)
                     eps_t = self.compute_residuals(R_curr, beta, F_t)
+                    R_t.append(R_curr)
+                    e_t.append(eps_t)
 
                 # Append new residual at right
                 eps_buffer = torch.roll(eps_buffer, shifts=-1, dims=1)
@@ -618,7 +618,9 @@ class AttentionFactorModel(nn.Module):
             returns_net.append(output["R_port_net"])
             costs.append(output["cost"])
             omegas.append(output["omega_t"])
-            explained_vars.append(output["explained_var"])
+            attention_weights.append(output["omega_F"])
+            R_t.append(R_curr)
+            e_t.append(output["eps_t"])
 
         if not returns_net:
             raise RuntimeError(
@@ -631,14 +633,17 @@ class AttentionFactorModel(nn.Module):
             "returns_net": torch.stack(returns_net), # (T_eff,)
             "costs": torch.stack(costs), # (T_eff,)
             "omegas": torch.stack(omegas), # (T_eff, N)
-            "explained_vars": torch.stack(explained_vars), # (T_eff,)
+            "att_w": torch.stack(attention_weights),
+            "R_t": torch.stack(R_t),
+            "eps_t": torch.stack(e_t),
         }
 
 
     def attention_factor_loss(
         self,
         returns_net,
-        explained_vars,
+        eps_t,
+        R_t,
         R_f, 
         lambda_var=100.0
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -657,6 +662,8 @@ class AttentionFactorModel(nn.Module):
         returns_net : net portfolio returns for the window - (T_eff,)
         explained_vars : per-step explained variance proxies - (T_eff, )
         R_f : daily risk-free rate (Gov 10-year bond rate used) - (T_eff, )
+        eps_t : all residual tensor to get variance - (T_tr, )
+        R_t : all returns tensor to get variance - (T_tr, )
         lambda_var: weight on variance explanation term - float
 
         Returns
@@ -665,28 +672,43 @@ class AttentionFactorModel(nn.Module):
         info : breakdown for logging - dict
         """
 
-        T = returns_net.shape[0]
+        # Mean return
+        mean_ret = returns_net.mean()
+        compounded = torch.prod(1 + returns_net)
+        mean_ann = (compounded ** (252/returns_net.shape[0])) - 1
+        std_ret = returns_net.std(unbiased=True).clamp(min=1e-8)
 
         # Net Sharpe ratio
-        mean_ret = returns_net.mean()
-        R_f_mean = R_f.mean()
-        std_ret = returns_net.std(unbiased=True).clamp(min=1e-8)
-        sharpe = (mean_ret - R_f_mean) / std_ret
-        print(f"Sharpe - {sharpe.shape}")
+        diff = returns_net - R_f
+        mean_ret_rf = diff.mean()
+        std_ret_rf = diff.std(unbiased=True).clamp(min=1e-8)
+        sharpe = mean_ret_rf / std_ret_rf
+
+        # Annualized sharpe ratio
+        sharpe_annual = sharpe * math.sqrt(252)
+
+        # Variance of R_t across time
+        var_R = torch.var(R_t, dim=0, correction=1)
+        
+        # Variance of residuals across time
+        var_e = torch.var(eps_t, dim=0, correction=1)
 
         # Explained variance term
-        mean_exp_var = explained_vars.mean().clamp(min=0.0, max=1.0)
-        print(f"mean_exp_var - {mean_exp_var.shape}")
+        unexplained = var_e / var_R
+        mean_exp_var = torch.mean(1.0 - unexplained)
 
         # Combined loss (negative because we minimise)
         loss = -(sharpe + lambda_var * mean_exp_var)
-        print(f"loss - {loss.shape}")
 
         # Diagnostics dict for logging
         info = {
             "loss": loss.detach(),
-            "mean_ret": mean_ret.detach(),
+            "sharpe_daily": sharpe.detach(),
+            "sharpe_annual": sharpe_annual.detach(),
+            "mean_ret_daily": mean_ret.detach(),
+            "std_ret_daily": std_ret.detach(),
             "mean_exp_var": mean_exp_var.detach(),
+            "ann_return": mean_ann.detach(),
         }
 
         return loss, info
@@ -705,17 +727,17 @@ if __name__ == "__main__":
         test_years = 1,
     )
 
-    X, R, dates, symbols = loader.get_tensors()
-    splits = loader.get_rolling_splits()
-    X_tr, R_tr, X_val, R_val, X_te, R_te = loader.get_window_tensors(splits[0])
-    R_f = X_tr[:, 0, 23]
-    print(f"R_f: {R_f.shape}")
-
     # Hyperparameters
     K = 30 # factors (start small for testing)
     d = 32 # attention hidden dim
     s = 30 # LongConv lookback
+
+    X, R, dates, symbols = loader.get_tensors()
     T, N, M = X.shape
+
+    splits = loader.get_rolling_splits()
+    X_tr, R_tr, X_val, R_val, X_te, R_te = loader.get_window_tensors(splits[0])
+    R_f = X_tr[s:, 0, 23]
 
     model = AttentionFactorModel(N, M, K, d, s)
 
@@ -731,7 +753,6 @@ if __name__ == "__main__":
     print(f"  T={T_tr}, s={s}, expected T_eff ≈ {T_eff}")
     print(f"  returns_net shape   : {seq_output['returns_net'].shape}")
     print(f"  omegas shape        : {seq_output['omegas'].shape}")
-    print(f"  explained_vars shape: {seq_output['explained_vars'].shape}")
 
     # Test loss function
     print()
@@ -741,9 +762,10 @@ if __name__ == "__main__":
 
     loss, info = model.attention_factor_loss(
         seq_output["returns_net"],
-        seq_output["explained_vars"],
+        seq_output["eps_t"],
+        seq_output["R_t"],
         R_f,
-        lambda_var=100.0,
+        lambda_var=0.0,
     )
     print(f"  loss             : {info['loss'].item():.4f}")
     print(f"  mean_exp_var     : {info['mean_exp_var'].item():.4f}")

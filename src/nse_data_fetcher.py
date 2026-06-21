@@ -90,8 +90,35 @@ class NSEDataFetcher:
         logger.info(f"Successfully fetched prices for {len(historical_data)} stocks")
 
         return historical_data
+    
+    def fetch_company_data(self) -> pd.DataFrame:
 
-    def save_data(self, historical_data: Dict[str, pd.DataFrame]) -> None:
+        logger.info(f"Fetching Company data for {len(self.nse_stocks)}")
+        metadata = []
+
+        for i, symbol in enumerate(self.nse_stocks):
+
+            try:
+                logger.info(f"[{i+1}/{len(self.nse_stocks)}] Fetching metadata")
+                ticker = yf.Ticker(symbol)
+                info = ticker.info
+                data = {
+                    'symbol': symbol,
+                    'name': info.get('longName', 'N/A'),
+                    'sector': info.get('sector', 'N/A'),
+                    'industry': info.get('industry', 'N/A'), 
+                }
+                metadata.append(data)
+
+            except Exception as e:
+                logger.error(f"Info Fetch Failed for {symbol}: {e}")
+        
+        metadata_df = pd.DataFrame(metadata)
+        logger.info("Info fetching completed!")
+
+        return metadata_df
+
+    def save_data(self, historical_data: Dict[str, pd.DataFrame], metadata: pd.DataFrame) -> None:
         
         """Save all fetched and computed data to disk."""
         logger.info("Saving data to disk...")
@@ -109,6 +136,13 @@ class NSEDataFetcher:
                 logger.error(f"Error saving price history for {symbol}: {e}")
  
         logger.info(f"Saved price history for {len(historical_data)} stocks")
+        
+        # Store metadata
+        try:
+            meta_path = self.data_dir / 'stock_metadata.csv'
+            metadata.to_csv(meta_path)
+        except Exception as e:
+            logger.error("Error saving metadata")
  
         # Run info JSON
         try:
@@ -123,6 +157,7 @@ class NSEDataFetcher:
             logger.info(f"Saved data info --> {info_path}")
         except Exception as e:
             logger.error(f"Error saving data info: {e}")
+            
 
     def run_and_fetch(self, start_date=None, end_date=None):
         """
@@ -135,7 +170,8 @@ class NSEDataFetcher:
         logger.info("-" * 60)
 
         historical_data = self.fetch_historical_data(start_date, end_date)
-        self.save_data(historical_data)
+        metadata = self.fetch_company_data()
+        self.save_data(historical_data, metadata)
  
         logger.info("=" * 60)
         logger.info("Data fetch and preparation completed successfully!")

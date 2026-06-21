@@ -503,8 +503,7 @@ class DataLoader:
 
         Window structure for train_years=8, val_years=2, test_years=1:
 
-            |------------8 train years------------|--1 test--|
-            |-------6 years-------|--2 val years--|
+        |-------8 years-------|--2 val years--|--1 test--|
 
         We work with year boundaries rather than exact day counts to match
         the paper's description. A "year" = all trading days in that
@@ -546,8 +545,8 @@ class DataLoader:
 
         while True:
             train_end_year = train_start_year + self.train_years - 1
-            val_start_year = train_end_year - self.val_years + 1
-            test_start_year = train_end_year + 1
+            val_start_year = train_end_year + 1
+            test_start_year = train_end_year + self.val_years + 1
             test_end_year = test_start_year + self.test_years - 1
 
             # Check all required years exist in the data
@@ -563,7 +562,7 @@ class DataLoader:
 
             # validation
             val_idx_start = year_to_idx[val_start_year][0]
-            val_idx_end = train_idx_end # exclusive
+            val_idx_end = year_to_idx[train_end_year + self.val_years][1] + 1 # exclusive
 
             # test
             test_idx_start = year_to_idx[test_start_year][0]
@@ -590,7 +589,7 @@ class DataLoader:
             logger.info(
                 f"  Window {window_num:2d}: "
                 f"train {train_start_year}-{train_end_year}  "
-                f"val {val_start_year}-{train_end_year}  "
+                f"val {val_start_year}-{train_end_year + self.val_years}  "
                 f"test {test_start_year}-{test_end_year}  "
                 f"(train_idx {train_idx_start}:{train_idx_end}, "
                 f"test_idx {test_idx_start}:{test_idx_end})"

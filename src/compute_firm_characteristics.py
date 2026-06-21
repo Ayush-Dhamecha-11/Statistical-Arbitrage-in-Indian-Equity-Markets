@@ -360,7 +360,7 @@ class ComputeCharacteristics:
             # To bypass initial null values in characteristics, we crop price history to start from 2011-02-01
             result = result["2011-02-01" :]
             rfr = rfr.reindex(result.index, method="ffill")
-            result["RFR"] = rfr["Price"] / 100 # Assign risk-free-return
+            result["RFR"] = (1 + rfr["Price"] / 100) ** (1/252) - 1 # Assign risk-free-return
 
             chars_d[symbol] = result
 
