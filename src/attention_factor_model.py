@@ -126,8 +126,17 @@ class LongConv(nn.Module):
             t -> [0, seq_len-1] is the time index (lag)
             x_h ~ N(0,1) is a random scale per channel
         """
+
+        K = torch.randn(d_hidden, seq_len, dtype=torch.float32) * 0.02
+        exp_dec = torch.zeros((d_hidden, seq_len), dtype=torch.float32)
+
+        for i in range(d_hidden):
+            for j in range(seq_len):
+                exp_dec[i, j] = torch.exp(-(j/seq_len) * torch.pow(torch.tensor(int(d_hidden/2)), torch.tensor(i/d_hidden)))
+        K = K * exp_dec
+        return K
     
-        h_idx = torch.arange(d_hidden, dtype=torch.float32) # (d_hidden,)
+        """h_idx = torch.arange(d_hidden, dtype=torch.float32) # (d_hidden,)
         t_idx = torch.arange(seq_len, dtype=torch.float32) #(seq_len,)
 
         decay_rate = (d_hidden / 2.0) ** (h_idx / d_hidden)
@@ -140,7 +149,7 @@ class LongConv(nn.Module):
         scale = torch.randn(d_hidden, 1)
         K_init = K_init * scale
 
-        return K_init
+        return K_init"""
     
     def squash(self, K: torch.Tensor) -> torch.Tensor:
         """
@@ -177,14 +186,14 @@ class LongConv(nn.Module):
         fft_len = 2*s
 
         # FFT
-        U_f = torch.fft.rfft(u, n=fft_len, dim=-1) # (N, d_hidden, 1 + fft_len//2)
-        K_f = torch.fft.rfft(K, n=fft_len, dim=-1) # (d_hidden, 1 + fft_len//2)
+        U_f = torch.fft.rfft(u, n=fft_len) # (N, d_hidden, 1 + fft_len//2)
+        K_f = torch.fft.rfft(K, n=fft_len) # (d_hidden, 1 + fft_len//2)
 
         # Elementwise multiplication of FFTs
         Y_f = U_f * (K_f.unsqueeze(0))
 
         # iFFT
-        y = torch.fft.irfft(Y_f, n=fft_len, dim=-1) # (N, d_hidden, fft_len)
+        y = torch.fft.irfft(Y_f, n=fft_len) # (N, d_hidden, fft_len)
 
         # Take first s elements --> (N, d_hidden, s)
         return y[..., :s] 
@@ -215,6 +224,7 @@ class LongConv(nn.Module):
 
         # Apply squash operation
         K_squash = self.squash(self.K_conv) # (d_hidden, s)
+        K_squash = self.dropout(K_squash)
 
         # LongConv operation
         y_conv = self.fft_conv(u, K_squash) # (N, d_hidden, s)
@@ -365,7 +375,6 @@ class AttentionFactorModel(nn.Module):
         """ 
         A = torch.mm(omega_F, omega_F.T) # (K, K)
         A = A + self.lambda_ridge * torch.eye(self.K, device=omega_F.device, dtype=omega_F.dtype)
-
         beta_T = torch.linalg.solve(A, omega_F) # (K, N)
         beta = beta_T.T # (N, K)
         return beta
@@ -464,7 +473,9 @@ class AttentionFactorModel(nn.Module):
         self,
         X_prev,
         R_curr,
-        eps_hist
+        eps_hist,
+        factor_mat,
+        mode="learnable",
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass for one timestep t.
@@ -491,11 +502,15 @@ class AttentionFactorModel(nn.Module):
 
         """
 
-        # Embed characteristics
-        X_tilde = self.embed_characteristics(X_prev) # (N, d)
-        
-        # Attention factor weights
-        omega_F = self.compute_factor_weights(X_tilde) # (K, N)
+        if mode=="learnable":
+            # Embed characteristics
+            X_tilde = self.embed_characteristics(X_prev) # (N, d)
+            
+            # Attention factor weights derived through learnable projections
+            omega_F = self.compute_factor_weights(X_tilde) # (K, N)
+        else:
+            # Attention factors derived through PCA
+            omega_F = factor_mat
 
         # Factor returns
         F_t = self.compute_factor_returns(omega_F, R_curr) # (K,)
@@ -538,7 +553,7 @@ class AttentionFactorModel(nn.Module):
             "F_t": F_t,
         }
     
-    def forward_sequence(self, X, R) -> Dict[str, torch.Tensor]:
+    def forward_sequence(self, X, R, factor_mat, mode="learnable") -> Dict[str, torch.Tensor]:
         """
         Run the forward pass across an entire sequence of T time steps.
         It passes a full window of T days and gets back a sequence of portfolio returns.
@@ -581,6 +596,7 @@ class AttentionFactorModel(nn.Module):
         costs = []
         omegas = []
         attention_weights = []
+        betas = []
         e_t = []
         R_t = []
 
@@ -593,13 +609,19 @@ class AttentionFactorModel(nn.Module):
             if t < self.s:
                 # Accumulate residuals
                 with torch.no_grad():
-                    X_tilde = self.embed_characteristics(X_prev)
-                    omega_F = self.compute_factor_weights(X_tilde)
+
+                    if mode=="learnable":
+                        X_tilde = self.embed_characteristics(X_prev)
+                        omega_F = self.compute_factor_weights(X_tilde)
+                    else:
+                        omega_F = factor_mat[t]
+
                     F_t = self.compute_factor_returns(omega_F, R_curr)
                     beta = self.compute_factor_loadings(omega_F)
                     eps_t = self.compute_residuals(R_curr, beta, F_t)
                     R_t.append(R_curr)
                     e_t.append(eps_t)
+                    betas.append(beta)
 
                 # Append new residual at right
                 eps_buffer = torch.roll(eps_buffer, shifts=-1, dims=1)
@@ -607,7 +629,10 @@ class AttentionFactorModel(nn.Module):
                 continue
 
             # Forward pass
-            output = self.forward(X_prev, R_curr, eps_buffer)
+            if mode=="pca":
+                output = self.forward(X_prev, R_curr, eps_buffer, factor_mat[t], mode)
+            else:
+                output = self.forward(X_prev, R_curr, eps_buffer, None, mode)
 
             # Update residual buffer with the newly computed eps_t
             eps_buffer = torch.roll(eps_buffer, shifts=-1, dims=1)
@@ -621,6 +646,7 @@ class AttentionFactorModel(nn.Module):
             attention_weights.append(output["omega_F"])
             R_t.append(R_curr)
             e_t.append(output["eps_t"])
+            betas.append(output["beta"])
 
         if not returns_net:
             raise RuntimeError(
@@ -636,16 +662,18 @@ class AttentionFactorModel(nn.Module):
             "att_w": torch.stack(attention_weights),
             "R_t": torch.stack(R_t),
             "eps_t": torch.stack(e_t),
+            "betas": torch.stack(betas),
         }
 
 
     def attention_factor_loss(
         self,
-        returns_net,
-        eps_t,
-        R_t,
-        R_f, 
-        lambda_var=100.0
+        returns_net: torch.Tensor,
+        omegas: torch.Tensor,
+        eps_t: torch.Tensor,
+        R_t: torch.Tensor,
+        R_f: torch.Tensor, 
+        lambda_var: float =100.0,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
         """
@@ -681,11 +709,14 @@ class AttentionFactorModel(nn.Module):
         # Net Sharpe ratio
         diff = returns_net - R_f
         mean_ret_rf = diff.mean()
-        std_ret_rf = diff.std(unbiased=True).clamp(min=1e-8)
+        std_ret_rf = returns_net.std(unbiased=True).clamp(min=1e-8)
         sharpe = mean_ret_rf / std_ret_rf
 
         # Annualized sharpe ratio
         sharpe_annual = sharpe * math.sqrt(252)
+
+        # mean turnover
+        turnover = torch.diff(omegas, dim=0).abs().sum(dim=1).mean()
 
         # Variance of R_t across time
         var_R = torch.var(R_t, dim=0, correction=1)
@@ -698,7 +729,7 @@ class AttentionFactorModel(nn.Module):
         mean_exp_var = torch.mean(1.0 - unexplained)
 
         # Combined loss (negative because we minimise)
-        loss = -(sharpe + lambda_var * mean_exp_var)
+        loss = -(0.1*sharpe)
 
         # Diagnostics dict for logging
         info = {

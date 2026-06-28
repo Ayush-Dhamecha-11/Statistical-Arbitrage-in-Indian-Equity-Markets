@@ -84,10 +84,11 @@ class ModelConfig:
     lambda_var: float = 100.0
     patience: int = 7
     min_delta: float = 1e-4
+    mode: str = "learnable"
 
     device: str = "auto"
-    save_dir: str = "../model_results"
-    seed: int = 42
+    save_dir: str = f"../model_results_{mode}"
+    seed: int = 0
 
     def __post_init__(self):
         if self.device == "auto":
@@ -193,6 +194,9 @@ class RollingTrainer:
         X = X.to(self.cfg.device)
         R = R.to(self.cfg.device)
 
+        if self.cfg.mode == "pca":
+            latent_pca_factors = self.compute_pca_factor(R, self.cfg.K, 126)
+
         for split in splits:
             window_num = split["window"]
             logger.info("")
@@ -221,7 +225,14 @@ class RollingTrainer:
                 f"val: {tuple(X_val.shape)}  "
                 f"test: {tuple(X_test.shape)}"
             )
-
+            
+            if self.cfg.mode == "pca":
+                factor_train = latent_pca_factors[split["train_idx_start"] : split["train_idx_end"]]
+                factor_val = latent_pca_factors[split["val_idx_start"] : split["val_idx_end"]]
+            else:
+                factor_train = None
+                factor_val = None
+            
             # Create fresh model for this window
             model = AttentionFactorModel(
                 N = N,
@@ -237,7 +248,7 @@ class RollingTrainer:
 
             # Train on this window
             best_val_loss, best_epoch = self.train_window(
-                model, X_train, R_train, X_val, R_val, window_num
+                model, X_train, R_train, X_val, R_val, factor_train, factor_val, window_num
             )
 
             logger.info(
@@ -262,6 +273,8 @@ class RollingTrainer:
         R_train: torch.Tensor,
         X_val: torch.Tensor,
         R_val: torch.Tensor,
+        factor_train: torch.Tensor,
+        factor_val: torch.Tensor,
         window_num: int,
     ) -> Tuple[float, int]:
         """
@@ -297,7 +310,7 @@ class RollingTrainer:
         # Learning rate scheduler
         # halve the LR if validation loss doesn't improve for 3 epochs.
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=3
+            optimizer, mode="min", factor=0.8, patience=3
         )
 
         # Early stopping
@@ -307,6 +320,7 @@ class RollingTrainer:
         )
 
         best_val_loss = float("inf")
+        best_train_loss = float("inf")
         best_epoch = 0
 
         logger.info(
@@ -319,12 +333,12 @@ class RollingTrainer:
 
             # One training epoch
             train_loss, train_info = self.run_epoch(
-                model, X_train, R_train, optimizer, train=True
+                model, X_train, R_train, factor_train, optimizer, train=True
             )
 
             # Validation
             val_loss, val_info = self.run_epoch(
-                model, X_val, R_val, optimizer=None, train=False
+                model, X_val, R_val, factor_val, optimizer=None, train=False
             )
 
             # LR scheduler step
@@ -341,9 +355,9 @@ class RollingTrainer:
             logger.info(
                 f"  Epoch {epoch:3d}/{self.cfg.epochs} | "
                 f"train_loss={train_loss:.4f} "
-                f"(SR_ann={train_info['sharpe_annual']:.3f}) | "
+                f"(SR={train_info['sharpe_daily']:.3f}) | "
                 f"val_loss={val_loss:.4f} "
-                f"(SR_ann={val_info['sharpe_annual']:.3f}) | "
+                f"(SR={val_info['sharpe_daily']:.3f}) | "
                 f"best_val={best_val_loss:.4f} @ ep{best_epoch} | "
                 f"lr={current_lr:.5f}"
             )
@@ -368,6 +382,7 @@ class RollingTrainer:
         model: AttentionFactorModel,
         X: torch.Tensor,
         R: torch.Tensor,
+        factor_mat: torch.Tensor,
         optimizer: Optional[optim.Optimizer],
         train: bool,
     ) -> Tuple[float, Dict]:
@@ -413,11 +428,12 @@ class RollingTrainer:
 
         with context:
             # Full forward pass over the entire time slice
-            seq_output = model.forward_sequence(X, R)
+            seq_output = model.forward_sequence(X, R, factor_mat, self.cfg.mode)
 
             # Compute loss
             loss, info = model.attention_factor_loss(
                 returns_net = seq_output["returns_net"],
+                omegas = seq_output["omegas"],
                 eps_t = seq_output["eps_t"],
                 R_t = seq_output["R_t"],
                 R_f = X[model.s:, 0, 23],
@@ -444,6 +460,29 @@ class RollingTrainer:
                 optimizer.step()
 
         return loss.item(), info
+    
+    def compute_pca_factor(
+        self,
+        R: torch.Tensor,
+        K: int,
+        window: int = 252,
+    ) -> torch.Tensor:
+        """
+        omega_F[t] = top-K eigenvectors of Cov(R[t-window:t]), shape (K, N).
+        Uses only R[t-window:t], strictly excluding day t (no look-ahead).
+        Rows before `window` are left as zero (insufficient history).
+        """
+        T, N = R.shape
+        omega_F = torch.zeros(T, K, N, dtype=R.dtype, device=R.device)
+
+        for t in range(window, T):
+            R_win = R[t - window : t]
+            cov = torch.cov(R_win.T)
+            eigvals, eigvecs = torch.linalg.eigh(cov)
+            omega_F[t] = eigvecs[:, -K:].T
+        
+        omega_F = omega_F / omega_F.abs().sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return omega_F
     
 
     def save_checkpoints(self, model: AttentionFactorModel, window_num: int) -> None:

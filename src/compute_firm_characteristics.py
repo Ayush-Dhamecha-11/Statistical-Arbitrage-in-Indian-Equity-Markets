@@ -280,12 +280,12 @@ class ComputeCharacteristics:
             start_date = end_date - timedelta(days=5 * 365)
 
         try:
-            logger.info(f"Fetching market index (Nifty50)...")
-            ticker = yf.Ticker("^NSEI")
+            logger.info(f"Fetching market index (Nifty100)...")
+            ticker = yf.Ticker("^CNX100")
             df = ticker.history(start=start_date, end=end_date, interval='1d')
 
             if df.empty:
-                logger.warning("No market index data retrieved — Beta/Resid_Var will use fallback")
+                logger.warning("No market index data retrieved")
                 return None
 
             df.columns = [c.lower() for c in df.columns]

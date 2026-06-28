@@ -134,10 +134,14 @@ class OOSTester:
         oos_dates = []
         oos_R_f = []
         oos_att_w = []
+        oos_betas = []
 
         X = X.to(self.cfg.device)
         R = R.to(self.cfg.device)
         oos_market_ret = [] 
+
+        if self.cfg.mode == "pca":
+            latent_pca_factors = self.compute_pca_factor(R, self.cfg.K, 252)
 
         for split in splits:
             window_num = split["window"]
@@ -154,6 +158,11 @@ class OOSTester:
 
             test_dates = dates[split["test_idx_start"] : split["test_idx_end"]]
 
+            if self.cfg.mode=="pca":
+                factor_test = latent_pca_factors[split["test_idx_start"] : split["test_idx_end"]]
+            else:
+                factor_test = None
+
             # Create fresh model for this window
             model = AttentionFactorModel(
                 N = N,
@@ -169,7 +178,7 @@ class OOSTester:
 
             # Load best checkpoint and run final test
             self.load_checkpoints(model, window_num)
-            test_metrics = self.test_window(model, X_test, R_test, test_dates)
+            test_metrics = self.test_window(model, X_test, R_test, factor_test, test_dates)
 
             # Assign window results
             wm = WindowMetrics(
@@ -199,6 +208,7 @@ class OOSTester:
             oos_dates.extend([str(d.date()) for d in dates_aligned])
             oos_R_f.extend(test_metrics["R_f_daily"])
             oos_att_w.append(test_metrics["att_w"])
+            oos_betas.append(test_metrics["betas"])
 
             self.log_window_results(wm)
 
@@ -212,6 +222,7 @@ class OOSTester:
 
         # Compute aggregate metrics over full OOS period
         oos_att_w = np.concatenate(oos_att_w, axis=0)
+        oos_betas = np.concatenate(oos_betas, axis=0)
         oos_gross_arr = np.array(oos_returns_gross)
         oos_net_arr = np.array(oos_returns_net)
         oos_R_f_arr = np.array(oos_R_f)
@@ -220,18 +231,21 @@ class OOSTester:
         mkt_tot = mkt_tot.sort_index()
         aligned_market_returns = None
         if market_returns is not None:
-            aligned_oos_ret, aligned_market_returns = self.align_market_returns(
-                mkt_tot, oos_gross_arr, oos_dates
+            aligned_oos_gret, aligned_oos_nret, aligned_market_returns, aligned_R_f, common_dates = self.align_market_returns(
+                mkt_tot, oos_gross_arr, oos_net_arr, oos_R_f_arr, oos_dates
             )
 
-        final_metrics = self.compute_metrics(oos_gross_arr, oos_net_arr, oos_R_f_arr, True, aligned_market_returns, aligned_oos_ret)
+        final_metrics = self.compute_metrics(oos_gross_arr, oos_net_arr, oos_R_f_arr, True, aligned_market_returns, aligned_oos_gret)
 
         results = {
             "window_metrics": all_window_metrics,
             "oos_att_weights": oos_att_w,
-            "oos_returns_gross": oos_returns_gross,
-            "oos_returns_net": oos_returns_net,
-            "oos_dates": oos_dates,
+            "oos_betas": oos_betas,
+            "oos_returns_gross": aligned_oos_gret.tolist(),
+            "oos_returns_net": aligned_oos_nret.tolist(),
+            "oos_dates": common_dates,
+            "oos_R_f_daily": aligned_R_f.tolist(),
+            "oos_nifty100": aligned_market_returns,
             "final_metrics": final_metrics,
             "config": asdict(self.cfg),
         }
@@ -240,12 +254,37 @@ class OOSTester:
         self.save_results(results)
 
         return results
+    
+    def compute_pca_factor(
+        self,
+        R: torch.Tensor,
+        K: int,
+        window: int = 252,
+    ) -> torch.Tensor:
+        """
+        omega_F[t] = top-K eigenvectors of Cov(R[t-window:t]), shape (K, N).
+        Uses only R[t-window:t], strictly excluding day t (no look-ahead).
+        Rows before `window` are left as zero (insufficient history).
+        """
+        T, N = R.shape
+        omega_F = torch.zeros(T, K, N, dtype=R.dtype, device=R.device)
+
+        for t in range(window, T):
+            R_win = R[t - window : t]
+            cov = torch.cov(R_win.T)
+            eigvals, eigvecs = torch.linalg.eigh(cov)
+            omega_F[t] = eigvecs[:, -K:].T
+        
+        omega_F = omega_F / omega_F.abs().sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return omega_F
 
     
     def align_market_returns(
         self,
         market_returns: pd.Series,
         oos_gross: np.ndarray,
+        oos_net: np.ndarray,
+        oos_R_f: np.ndarray,
         oos_dates: List[str],
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
@@ -255,8 +294,10 @@ class OOSTester:
         mkt_ret = market_returns.copy()
         mkt_ret.index = mkt_ret.index.strftime('%Y-%m-%d')
 
-        port = pd.Series(oos_gross, index=oos_dates)
-        common_dates = sorted(set(mkt_ret.index).intersection(set(port.index)))
+        port_gross = pd.Series(oos_gross, index=oos_dates)
+        port_net = pd.Series(oos_net, index=oos_dates)
+        R_f = pd.Series(oos_R_f, index=oos_dates)
+        common_dates = sorted(set(mkt_ret.index).intersection(set(port_gross.index)))
         #print("comm: ", len(common_dates))
 
         if not common_dates:
@@ -267,12 +308,14 @@ class OOSTester:
             return None, None
  
         n_dropped_mkt = len(mkt_ret) - len(common_dates)
-        n_dropped_port = len(port) - len(common_dates)
+        n_dropped_port = len(port_gross) - len(common_dates)
  
         r_mkt_common  = mkt_ret.loc[common_dates].values
-        r_port_common = port.loc[common_dates].values
+        r_gport_common = port_gross.loc[common_dates].values
+        r_nport_common = port_net.loc[common_dates].values
+        R_f_common = R_f[common_dates].values
  
-        return r_port_common, r_mkt_common
+        return r_gport_common, r_nport_common, r_mkt_common, R_f_common, common_dates
     
     
     def test_window(
@@ -280,6 +323,7 @@ class OOSTester:
         model: AttentionFactorModel,
         X_test: torch.Tensor,
         R_test: torch.Tensor,
+        factor_mat: torch.Tensor,
         test_dates: List,
     ) -> Dict:
         """
@@ -301,12 +345,13 @@ class OOSTester:
         model.omega_prev = model.omega_prev.to(self.cfg.device)
 
         with torch.no_grad():
-            seq_output = model.forward_sequence(X_test, R_test)
+            seq_output = model.forward_sequence(X_test, R_test, factor_mat, self.cfg.mode)
 
         returns_gross = seq_output["returns_gross"].cpu().numpy()
         returns_net = seq_output["returns_net"].cpu().numpy()
         costs = seq_output["costs"].cpu().numpy()
         att_weight = seq_output["att_w"].cpu().numpy()
+        betas = seq_output["betas"].cpu().numpy()
 
         R_f_daily = X_test[model.s:, 0, 23]
         R_f_daily = R_f_daily.cpu().numpy()
@@ -318,6 +363,7 @@ class OOSTester:
         metrics["returns_net"] = returns_net.tolist()
         metrics["R_f_daily"] = R_f_daily.tolist()
         metrics["att_w"] = att_weight
+        metrics["betas"] = betas
 
         return metrics
     

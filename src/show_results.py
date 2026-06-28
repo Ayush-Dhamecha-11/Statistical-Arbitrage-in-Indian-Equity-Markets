@@ -5,27 +5,68 @@ for all tested factor's results
 It plots cumulative returns altogather in a lineplot
 It plots Attention factor composition of each stocks for first n factors
 """
-
-import json
+from sklearn.manifold import TSNE
+from adjustText import adjust_text
+import umap
 import logging
-import math
-from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.dates as mdates
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from data_loader import DataLoader
-from attention_factor_model import AttentionFactorModel
-from train import RollingTrainer, ModelConfig
-from test_oos import OOSTester, WindowMetrics
 
 logger = logging.getLogger(__name__)
+
+def plot_beta_loading(
+    symbols: list,
+    sector_map: dict,
+    n_comp=2,
+    pxty=20,
+    metrics: dict = None,
+    color_map: dict = None,
+):
+
+    tsne = TSNE(
+        n_components=n_comp,
+        perplexity=pxty,
+        learning_rate="auto",
+        init="pca",
+        random_state=42
+    )
+
+    """reducer = umap.UMAP(
+        n_neighbors=10,
+        random_state=42
+    )"""
+
+    embedding = tsne.fit_transform(metrics["oos_betas"][0])
+
+    colors = []
+    texts = []
+
+    for stock, sec in sector_map.items():
+        colors.append(get_color_for_sector(sec, color_map))
+
+    fig = plt.figure(figsize=(12,8))
+    plt.scatter(embedding[:,0], embedding[:,1], c=colors)
+
+    for i in range(1,12):
+        texts.append(
+            plt.text(
+                embedding[i,0],
+                embedding[i,1],
+                symbols[i*7],
+                fontsize=8
+            )
+        )   
+    adjust_text(texts)
+    plt.xlabel("t-SNE Dimension 1", fontsize=14)
+    plt.ylabel("t-SNE Dimension 2", fontsize=14)
+    plt.tight_layout()
+
+    return fig
 
 def show_all_oos_final_results(final_metrics) -> None:
     """
@@ -37,17 +78,17 @@ def show_all_oos_final_results(final_metrics) -> None:
 
     """
     print()
-    print("-"*60)
-    print("-"*11, "Out Of Sample Annualized Performance", "-"*11)
-    print("-"*60)
-    print(f"{'K':<3} {'SR':>4} {'mu':>6} {'sigma':>7} {'SR_net':>8} {'mu_net':>8} {'sigma_net':>10} {'Beta':>5}")
-    print("-"*60)
+    print("-"*68)
+    print("-"*15, "Out Of Sample Annualized Performance", "-"*15)
+    print("-"*68)
+    print(f"{'K':<10} {'SR':>4} {'mu':>6} {'sigma':>7} {'SR_net':>8} {'mu_net':>8} {'sigma_net':>10} {'Beta':>5}")
+    print("-"*68)
     # Dictionary to store results for all K (factors)
     returns_dict = {}
     
     for k, metric in final_metrics.items():
         print(
-            f"{k:<3}"
+            f"{k:<10}"
             f"{metric["final_metrics"]["SR"]:>6.2f}"
             f"{metric["final_metrics"]["mu"]:>7.2f}"
             f"{metric["final_metrics"]["sigma"]:>7.2f}"
@@ -56,7 +97,11 @@ def show_all_oos_final_results(final_metrics) -> None:
             f"{metric["final_metrics"]["sigma_net"]:>10.2f}"
             f"{metric["final_metrics"]["beta"]:>8.2f}"
         )
+
+        returns_dict["RF_returns"] = metric["oos_R_f_daily"]
+        returns_dict["Nifty100_returns"] = metric["oos_nifty100"]
         returns_dict[f"K={k}"] = metric["oos_returns_net"]
+        
         dates_str = metric["oos_dates"]
         dates = pd.to_datetime(dates_str)
     
@@ -65,7 +110,7 @@ def show_all_oos_final_results(final_metrics) -> None:
     df_returns = pd.DataFrame(returns_dict, index=dates)
 
     # Cumulative returns
-    df_cumulative = ((df_returns).cumsum())*100
+    df_cumulative = ((df_returns + 1).cumprod() - 1)*100
 
     fig = plt.figure(figsize=(11, 7))
 
@@ -102,7 +147,6 @@ def show_all_oos_final_results(final_metrics) -> None:
     
 
 # Fixed colour mapping so the legend is consistent across multiple figures.
-# Adapt these sector names to whatever your nse_metadata.csv 'sector' column
 # actually contains (yfinance sector strings for NSE stocks).
 Color_maps = {
     "Technology": "#9B7FC7",
