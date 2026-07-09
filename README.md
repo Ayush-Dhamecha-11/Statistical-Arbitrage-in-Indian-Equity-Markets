@@ -35,7 +35,8 @@ This project explores whether such approaches can be effectively applied to Indi
 
 ## Implementation Flow & Architecture
 
-<img width="1556" height="1066" alt="MindMap" src="https://github.com/user-attachments/assets/74077680-0ba3-4509-aede-509817631fbc" />
+<img width="1556" height="1066" alt="Statistical Arbitrage in Indian Equity Market" src="https://github.com/user-attachments/assets/4624042b-23b0-40d7-8095-2f12d79b0444" />
+
 
 ## Result
 
