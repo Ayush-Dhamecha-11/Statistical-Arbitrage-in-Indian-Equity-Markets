@@ -729,7 +729,7 @@ class AttentionFactorModel(nn.Module):
         mean_exp_var = torch.mean(1.0 - unexplained)
 
         # Combined loss (negative because we minimise)
-        loss = -(0.1*sharpe)
+        loss = -(0.5*mean_ret_rf - 0.05*std_ret_rf + lambda_var*mean_exp_var)
 
         # Diagnostics dict for logging
         info = {

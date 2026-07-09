@@ -4,6 +4,7 @@ import pandas as pd
 from data_loader import DataLoader
 from train import RollingTrainer, ModelConfig
 from test_oos import OOSTester
+from signature_prep import build_signature_features, plot_signature_similarity
 from show_results import show_all_oos_final_results, plot_factor_portfolio_weights, plot_beta_loading, Color_maps
 
 logging.basicConfig(
@@ -13,12 +14,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
+# Model parameters to configure
 data_dir = "../data"
-
 years_to_train = 8
 years_to_validate = 2
 years_to_test = 1
+K_list = [1,3,5,8,15,20,30,50]
+md = ["learnable"]  # ["learnable", "pca"]
+hidden_projection_dim = 32
+lookback_length = 40
+epoch = 30
+learning_rate = 0.005
+weight_decay = 0.002
+lambda_var_coeff = 0.0
+lambda_ridge = 0.01
+lambda_squash = 0.001
+early_stop_patience = 6
+dev = "cpu"
 
 # Load the data
 loader = DataLoader(
@@ -37,26 +49,21 @@ splits = loader.get_rolling_splits()
 logger.info(f"X shape: {tuple(X.shape)}  R shape: {tuple(R.shape)}")
 logger.info(f"Rolling windows: {len(splits)}")
 
+# Replace firm characteristics with signature features
+syms = []
+for ele in symbols:
+    sym = ele.replace("_", "").replace("historical", "").replace("chars", "")
+    syms.append(sym)
+
+#X_sig = build_signature_features(R, depth=3, window=250)
+#dist_df = plot_signature_similarity(X_sig, syms, figsize=(14, 14))
+
 # load the csv file having company sector information
 metadata = pd.read_csv('../data/stock_metadata.csv')
 symbols = metadata['symbol'].tolist()
 sectors = metadata['sector'].unique().tolist()
 long_names = metadata['name'].tolist()
 sector_map = metadata.set_index('symbol')['sector'].to_dict()
-
-# Model parameters to configure
-K_list = [1,3,5,8,15,20,30,50]
-md = ["learnable"]
-hidden_projection_dim = 32
-lookback_length = 40
-epoch = 30
-learning_rate = 0.002
-weight_decay = 0.002
-lambda_var_coeff = 0.05
-lambda_ridge = 0.01
-lambda_squash = 0.001
-early_stop_patience = 10
-dev = "cpu"
 
 # store final metrics of each tested model
 final_content = {}
@@ -95,7 +102,7 @@ for k in K_list:
         final_content[f"{k}_{mdd}"] = results
 
         # Print summary table
-        print("\n" + "-" * 65)
+        """print("\n" + "-" * 65)
         print(f"RESULTS SUMMARY   K={config.K}")
         print("-" * 65)
         print(f"{'Window':<8} {'Test Period':<22} {'SR':>6} {'SR_net':>8} {'mu%':>7} {'mu_net%':>9}")
@@ -119,10 +126,10 @@ for k in K_list:
             f"{fm['mu_net']:>9.2f}"
         )
         print("-" * 65)
-        print()
+        print()"""
 
 # Result Plottings and final table
-for k in K_list:
+"""for k in K_list:
     for mdd in md:
         results = final_content[f"{k}_{mdd}"]
         fig1 = plot_factor_portfolio_weights(
@@ -152,7 +159,7 @@ for k in K_list:
 
         out_path2 = out_path / f"t-SNE_plot_K={k}_{mdd}_test.png"
         fig2.savefig(out_path2, dpi=120, bbox_inches="tight")
-        print(f"Saved test figure (K={k}) to {out_path}")
+        print(f"Saved test figure (K={k}) to {out_path}")"""
 
 
 show_all_oos_final_results(final_content)

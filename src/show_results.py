@@ -64,6 +64,7 @@ def plot_beta_loading(
     adjust_text(texts)
     plt.xlabel("t-SNE Dimension 1", fontsize=14)
     plt.ylabel("t-SNE Dimension 2", fontsize=14)
+    plt.grid(True, which='both', linestyle='-', color='#e0e0e0', linewidth=0.8)
     plt.tight_layout()
 
     return fig
@@ -81,14 +82,14 @@ def show_all_oos_final_results(final_metrics) -> None:
     print("-"*68)
     print("-"*15, "Out Of Sample Annualized Performance", "-"*15)
     print("-"*68)
-    print(f"{'K':<10} {'SR':>4} {'mu':>6} {'sigma':>7} {'SR_net':>8} {'mu_net':>8} {'sigma_net':>10} {'Beta':>5}")
+    print(f"{'K':<12} {'SR':>4} {'mu':>6} {'sigma':>7} {'SR_net':>8} {'mu_net':>8} {'sigma_net':>10} {'Beta':>5}")
     print("-"*68)
     # Dictionary to store results for all K (factors)
     returns_dict = {}
     
     for k, metric in final_metrics.items():
         print(
-            f"{k:<10}"
+            f"{k:<12}"
             f"{metric["final_metrics"]["SR"]:>6.2f}"
             f"{metric["final_metrics"]["mu"]:>7.2f}"
             f"{metric["final_metrics"]["sigma"]:>7.2f}"
@@ -107,7 +108,7 @@ def show_all_oos_final_results(final_metrics) -> None:
     
     print()
     # Convert to dataframe having dates as index and K (=1,3,etc) as column with returns
-    df_returns = pd.DataFrame(returns_dict, index=dates)
+    """df_returns = pd.DataFrame(returns_dict, index=dates)
 
     # Cumulative returns
     df_cumulative = ((df_returns + 1).cumprod() - 1)*100
@@ -139,11 +140,10 @@ def show_all_oos_final_results(final_metrics) -> None:
     plt.xlim(df_cumulative.index.min(), df_cumulative.index.max())
     plt.tight_layout()
 
-    out_path = Path("../result_figures/Cumulative_returns_test.png")
+    out_path = Path("../result_figures/Cumulative_returns_test_learnable.png")
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    print("Saved test figure of cumulative returns")
+    print("Saved test figure of cumulative returns")"""
 
-    plt.show()
     
 
 # Fixed colour mapping so the legend is consistent across multiple figures.
